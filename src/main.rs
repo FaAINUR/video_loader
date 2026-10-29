@@ -77,6 +77,13 @@ impl VideoContainer {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
+enum ProxyMode {
+    Auto,
+    Always,
+    Never,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(default)]
 struct SavedSettings {
@@ -86,6 +93,10 @@ struct SavedSettings {
     use_browser_cookies: bool,
     browser: String,
     download_playlists: bool,
+    proxy_mode: ProxyMode,
+    proxy_url: String,
+    embed_cover: bool,
+    save_cover: bool,
 }
 
 impl Default for SavedSettings {
@@ -100,6 +111,10 @@ impl Default for SavedSettings {
             use_browser_cookies: true,
             browser: "firefox".to_owned(),
             download_playlists: false,
+            proxy_mode: ProxyMode::Auto,
+            proxy_url: String::new(),
+            embed_cover: false,
+            save_cover: false,
         }
     }
 }
@@ -151,6 +166,14 @@ struct DownloadItem {
     audio_id: Option<String>,
     audio_label: String,
     browser: Option<String>,
+
+    // None — не передавать --proxy (используется окружение).
+    // Some("") — прямое подключение.
+    // Some(адрес) — прокси.
+    proxy: Option<String>,
+    embed_cover: bool,
+    save_cover: bool,
+
     output_dir: PathBuf,
 
     status: Status,
@@ -214,6 +237,77 @@ impl Default for App {
 
             dependency_receiver: None,
             dependencies: None,
+        }
+    }
+}
+
+// --------------------------------------------------
+// Ссылки и подключение
+// --------------------------------------------------
+
+fn valid_url(url: &str) -> bool {
+    let remainder = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"));
+
+    match remainder {
+        Some(rest) => {
+            !rest.is_empty()
+                && !url.chars().any(char::is_whitespace)
+                && !url.contains('[')
+                && !url.contains(']')
+        }
+
+        None => false,
+    }
+}
+
+fn is_youtube(url: &str) -> bool {
+    let rest = url.split("://").nth(1).unwrap_or("");
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = host.rsplit('@').next().unwrap_or(host);
+    let host = host.split(':').next().unwrap_or(host).to_lowercase();
+
+    ["youtube.com", "youtu.be", "youtube-nocookie.com"]
+        .iter()
+        .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
+}
+
+fn valid_proxy(value: &str) -> bool {
+    value.is_empty()
+        || [
+            "http://",
+            "https://",
+            "socks4://",
+            "socks5://",
+            "socks5h://",
+        ]
+        .iter()
+        .any(|prefix| value.starts_with(prefix))
+}
+
+// None — не передавать --proxy.
+// Some("") — прямое подключение.
+fn proxy_for(settings: &SavedSettings, url: &str) -> Option<String> {
+    let proxy = settings.proxy_url.trim();
+
+    match settings.proxy_mode {
+        ProxyMode::Never => Some(String::new()),
+
+        ProxyMode::Always => {
+            if proxy.is_empty() {
+                None
+            } else {
+                Some(proxy.to_owned())
+            }
+        }
+
+        ProxyMode::Auto => {
+            if is_youtube(url) && !proxy.is_empty() {
+                Some(proxy.to_owned())
+            } else {
+                Some(String::new())
+            }
         }
     }
 }
@@ -297,7 +391,15 @@ impl App {
             return;
         }
 
+        if !valid_proxy(self.settings.proxy_url.trim()) {
+            self.notice = "Адрес прокси должен начинаться с http://, https://, \
+                 socks4://, socks5:// или socks5h://."
+                .to_owned();
+            return;
+        }
+
         let browser = self.browser_setting();
+        let proxy = proxy_for(&self.settings, &url);
         let (sender, receiver) = mpsc::channel();
 
         self.audio_options.clear();
@@ -308,7 +410,7 @@ impl App {
         self.notice.clear();
 
         thread::spawn(move || {
-            let result = load_audio_options(&url, browser.as_deref());
+            let result = load_audio_options(&url, browser.as_deref(), proxy.as_deref());
 
             let _ = sender.send(AudioResult { url, result });
         });
@@ -402,6 +504,23 @@ impl App {
             return;
         }
 
+        if !valid_proxy(self.settings.proxy_url.trim()) {
+            self.notice = "Адрес прокси должен начинаться с http://, https://, \
+                 socks4://, socks5:// или socks5h://."
+                .to_owned();
+            return;
+        }
+
+        if self.settings.embed_cover
+            && self.settings.quality != Quality::AudioMp3
+            && self.settings.container == VideoContainer::Webm
+        {
+            self.notice = "Для WebM обложка встраивается ненадёжно. Выберите \
+                 MKV/MP4 или сохраняйте обложку отдельным файлом."
+                .to_owned();
+            return;
+        }
+
         let multiple = urls.len() > 1;
 
         if (multiple || self.settings.download_playlists) && self.selected_audio.is_some() {
@@ -465,6 +584,8 @@ impl App {
                 continue;
             }
 
+            let proxy = proxy_for(&self.settings, &url);
+
             self.items.push(DownloadItem {
                 id: self.next_id,
                 url,
@@ -475,6 +596,9 @@ impl App {
                 audio_id: audio_id.clone(),
                 audio_label: audio_label.clone(),
                 browser: browser.clone(),
+                proxy,
+                embed_cover: self.settings.embed_cover,
+                save_cover: self.settings.save_cover,
                 output_dir: output_dir.clone(),
 
                 status: Status::Waiting,
@@ -976,6 +1100,25 @@ impl App {
 
             ui.add_space(10.0);
 
+            let webm_video = self.settings.quality != Quality::AudioMp3
+                && self.settings.container == VideoContainer::Webm;
+
+            ui.add_enabled(
+                !webm_video,
+                egui::Checkbox::new(&mut self.settings.embed_cover, "Встроить обложку в файл"),
+            );
+
+            ui.checkbox(
+                &mut self.settings.save_cover,
+                "Сохранить обложку отдельным файлом (jpg)",
+            );
+
+            if webm_video {
+                ui.small("Для WebM встраивание обложки отключено.");
+            }
+
+            ui.add_space(10.0);
+
             let audio_label = self
                 .selected_audio
                 .as_ref()
@@ -1098,6 +1241,19 @@ impl App {
                             });
 
                             ui.label(format!("Озвучка: {}", item.audio_label));
+
+                            ui.small(match item.proxy.as_deref() {
+                                Some("") => "Подключение: напрямую",
+                                Some(_) => "Подключение: через прокси",
+                                None => "Подключение: по окружению",
+                            });
+
+                            ui.small(match (item.embed_cover, item.save_cover) {
+                                (true, true) => "Обложка: встроить и сохранить файлом",
+                                (true, false) => "Обложка: встроить",
+                                (false, true) => "Обложка: отдельным файлом",
+                                (false, false) => "Обложка: нет",
+                            });
 
                             if item.status == Status::Downloading {
                                 ui.add_space(8.0);
@@ -1301,12 +1457,51 @@ impl App {
         ui.separator();
         ui.heading("Подключение");
 
-        ui.label("Используется окружение, из которого запущено приложение.");
+        let mut proxy_changed = false;
+
+        for (mode, label) in [
+            (ProxyMode::Auto, "Авто: прокси только для YouTube"),
+            (ProxyMode::Always, "Всегда через прокси"),
+            (ProxyMode::Never, "Без прокси"),
+        ] {
+            proxy_changed |= ui
+                .radio_value(&mut self.settings.proxy_mode, mode, label)
+                .changed();
+        }
+
+        ui.add_enabled_ui(self.settings.proxy_mode != ProxyMode::Never, |ui| {
+            ui.label("Адрес прокси:");
+
+            proxy_changed |= ui
+                .add(
+                    egui::TextEdit::singleline(&mut self.settings.proxy_url)
+                        .hint_text("socks5h://127.0.0.1:12334")
+                        .desired_width(350.0),
+                )
+                .changed();
+        });
+
+        if proxy_changed {
+            self.reset_audio();
+            self.show_audio_window = false;
+        }
+
+        if !valid_proxy(self.settings.proxy_url.trim()) {
+            ui.colored_label(
+                egui::Color32::from_rgb(240, 120, 90),
+                "Адрес должен начинаться с http://, https://, \
+                 socks4://, socks5:// или socks5h://.",
+            );
+        }
 
         ui.small(
-            "Адрес Hiddify не прописан в программе. \
-             Запуск из меню рабочего стола может иметь \
-             другое окружение, чем запуск из терминала.",
+            "В режиме «Авто» VK, Rutube и другие сайты идут напрямую. \
+             Если у вас системный VPN, оставьте адрес пустым.",
+        );
+
+        ui.small(
+            "Прямое подключение передаётся как --proxy \"\", поэтому \
+             переменная ALL_PROXY не должна влиять на такие задачи.",
         );
 
         ui.add_space(16.0);
@@ -1357,31 +1552,18 @@ impl App {
 }
 
 // --------------------------------------------------
-// Ссылки и аудиодорожки
+// Аудиодорожки
 // --------------------------------------------------
-
-fn valid_url(url: &str) -> bool {
-    let remainder = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"));
-
-    match remainder {
-        Some(rest) => {
-            !rest.is_empty()
-                && !url.chars().any(char::is_whitespace)
-                && !url.contains('[')
-                && !url.contains(']')
-        }
-
-        None => false,
-    }
-}
 
 fn field<'a>(value: &'a Value, name: &str) -> &'a str {
     value.get(name).and_then(Value::as_str).unwrap_or("")
 }
 
-fn load_audio_options(url: &str, browser: Option<&str>) -> Result<Vec<AudioOption>, String> {
+fn load_audio_options(
+    url: &str,
+    browser: Option<&str>,
+    proxy: Option<&str>,
+) -> Result<Vec<AudioOption>, String> {
     let mut command = Command::new("yt-dlp");
 
     command.args([
@@ -1397,6 +1579,10 @@ fn load_audio_options(url: &str, browser: Option<&str>) -> Result<Vec<AudioOptio
 
     if let Some(browser) = browser {
         command.arg("--cookies-from-browser").arg(browser);
+    }
+
+    if let Some(proxy) = proxy {
+        command.arg("--proxy").arg(proxy);
     }
 
     hide_console(&mut command);
@@ -1547,6 +1733,22 @@ impl RunningDownload {
 
         if let Some(browser) = item.browser.as_deref() {
             command.arg("--cookies-from-browser").arg(browser);
+        }
+
+        if let Some(proxy) = item.proxy.as_deref() {
+            command.arg("--proxy").arg(proxy);
+        }
+
+        if item.embed_cover {
+            command.arg("--embed-thumbnail");
+        }
+
+        if item.save_cover {
+            command.arg("--write-thumbnail");
+        }
+
+        if item.embed_cover || item.save_cover {
+            command.args(["--convert-thumbnails", "jpg"]);
         }
 
         if item.quality == Quality::AudioMp3 {
@@ -1835,8 +2037,8 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("VideoLoader")
-            .with_inner_size([1180.0, 940.0])
-            .with_min_inner_size([850.0, 760.0]),
+            .with_inner_size([1180.0, 980.0])
+            .with_min_inner_size([850.0, 780.0]),
         ..Default::default()
     };
 
