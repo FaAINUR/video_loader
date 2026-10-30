@@ -15,6 +15,9 @@ use std::time::Duration;
 // --------------------------------------------------
 
 const SETTINGS_KEY: &str = "video_loader_settings_v1";
+const JOBS_KEY: &str = "video_loader_jobs_v1";
+const MAX_HISTORY: usize = 200;
+const SAVED_LOG_LINES: usize = 60;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Page {
@@ -119,13 +122,14 @@ impl Default for SavedSettings {
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
 enum Status {
     Waiting,
     Downloading,
     Completed,
     Failed,
     Cancelled,
+    Interrupted,
 }
 
 impl Status {
@@ -136,12 +140,25 @@ impl Status {
             Self::Completed => "Завершено",
             Self::Failed => "Ошибка",
             Self::Cancelled => "Отменено",
+            Self::Interrupted => "Прервано (ждёт возобновления)",
         }
     }
 
+    // Задача запущена или стоит в очереди на запуск.
     fn active(self) -> bool {
         matches!(self, Self::Waiting | Self::Downloading)
     }
+
+    // Задачу нельзя считать завершённой: она ещё не выполнена.
+    fn pending(self) -> bool {
+        matches!(self, Self::Waiting | Self::Downloading | Self::Interrupted)
+    }
+}
+
+enum CardAction {
+    Cancel(u64),
+    Resume(u64),
+    Remove(u64),
 }
 
 #[derive(Clone)]
@@ -173,6 +190,8 @@ struct DownloadItem {
     proxy: Option<String>,
     embed_cover: bool,
     save_cover: bool,
+    cover_embedded: bool,
+    cover_problem: bool,
 
     output_dir: PathBuf,
 
@@ -184,6 +203,32 @@ struct DownloadItem {
     logs: Vec<String>,
 
     running: Option<RunningDownload>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SavedJob {
+    id: u64,
+    url: String,
+    quality: Quality,
+    container: VideoContainer,
+    download_playlist: bool,
+    audio_id: Option<String>,
+    audio_label: String,
+    browser: Option<String>,
+    #[serde(default)]
+    proxy: Option<String>,
+    #[serde(default)]
+    embed_cover: bool,
+    #[serde(default)]
+    save_cover: bool,
+    #[serde(default)]
+    cover_embedded: bool,
+    output_dir: String,
+    status: Status,
+    #[serde(default)]
+    message: String,
+    #[serde(default)]
+    logs: Vec<String>,
 }
 
 struct RunningDownload {
@@ -313,7 +358,7 @@ fn proxy_for(settings: &SavedSettings, url: &str) -> Option<String> {
 }
 
 // --------------------------------------------------
-// Создание приложения и добавление задач
+// Создание приложения, сохранение и восстановление
 // --------------------------------------------------
 
 impl App {
@@ -335,7 +380,115 @@ impl App {
             app.settings.browser = "firefox".to_owned();
         }
 
+        let saved_jobs: Vec<SavedJob> = cc
+            .storage
+            .and_then(|storage| eframe::get_value(storage, JOBS_KEY))
+            .unwrap_or_default();
+
+        app.restore_jobs(saved_jobs);
+
         app
+    }
+
+    fn restore_jobs(&mut self, saved: Vec<SavedJob>) {
+        let mut max_id = 0;
+
+        for job in saved {
+            max_id = max_id.max(job.id);
+
+            let (status, message) = match job.status {
+                Status::Waiting | Status::Downloading => (
+                    Status::Interrupted,
+                    "Прервано при закрытии программы. \
+                     Нажмите «Возобновить»."
+                        .to_owned(),
+                ),
+
+                other => (other, job.message.clone()),
+            };
+
+            self.items.push(DownloadItem {
+                id: job.id,
+                url: job.url,
+                quality: job.quality,
+                container: job.container,
+                download_playlist: job.download_playlist,
+
+                audio_id: job.audio_id,
+                audio_label: job.audio_label,
+                browser: job.browser,
+                proxy: job.proxy,
+                embed_cover: job.embed_cover,
+                save_cover: job.save_cover,
+                cover_embedded: job.cover_embedded,
+                cover_problem: false,
+
+                output_dir: PathBuf::from(job.output_dir),
+
+                status,
+                percent: if status == Status::Completed {
+                    1.0
+                } else {
+                    0.0
+                },
+                speed: String::new(),
+                eta: String::new(),
+                message,
+                logs: job.logs,
+
+                running: None,
+            });
+        }
+
+        self.next_id = max_id + 1;
+    }
+
+    fn saved_jobs(&self) -> Vec<SavedJob> {
+        let finished = |status: Status| {
+            matches!(
+                status,
+                Status::Completed | Status::Failed | Status::Cancelled
+            )
+        };
+
+        let finished_total = self
+            .items
+            .iter()
+            .filter(|item| finished(item.status))
+            .count();
+
+        let mut to_skip = finished_total.saturating_sub(MAX_HISTORY);
+        let mut result = Vec::new();
+
+        for item in &self.items {
+            if finished(item.status) && to_skip > 0 {
+                to_skip -= 1;
+                continue;
+            }
+
+            let start = item.logs.len().saturating_sub(SAVED_LOG_LINES);
+
+            result.push(SavedJob {
+                id: item.id,
+                url: item.url.clone(),
+                quality: item.quality,
+                container: item.container,
+                download_playlist: item.download_playlist,
+                audio_id: item.audio_id.clone(),
+                audio_label: item.audio_label.clone(),
+                browser: item.browser.clone(),
+                proxy: item.proxy.clone(),
+                embed_cover: item.embed_cover,
+                save_cover: item.save_cover,
+                cover_embedded: item.cover_embedded,
+                output_dir: item.output_dir.to_string_lossy().into_owned(),
+                status: item.status,
+                message: item.message.clone(),
+                logs: item.logs[start..].to_vec(),
+            });
+        }
+
+        result
     }
 
     fn browser_setting(&self) -> Option<String> {
@@ -573,13 +726,13 @@ impl App {
                 continue;
             }
 
-            let already_active = self.items.iter().any(|item| {
+            let already_pending = self.items.iter().any(|item| {
                 item.url == url
                     && item.download_playlist == self.settings.download_playlists
-                    && item.status.active()
+                    && item.status.pending()
             });
 
-            if already_active {
+            if already_pending {
                 skipped += 1;
                 continue;
             }
@@ -599,6 +752,8 @@ impl App {
                 proxy,
                 embed_cover: self.settings.embed_cover,
                 save_cover: self.settings.save_cover,
+                cover_embedded: false,
+                cover_problem: false,
                 output_dir: output_dir.clone(),
 
                 status: Status::Waiting,
@@ -622,7 +777,7 @@ impl App {
         self.notice = if skipped > 0 {
             format!(
                 "Добавлено задач: {added}. \
-                 Пропущено повторных или активных ссылок: {skipped}."
+                 Пропущено повторных или незавершённых ссылок: {skipped}."
             )
         } else {
             format!("Добавлено задач: {added}.")
@@ -631,7 +786,7 @@ impl App {
 }
 
 // --------------------------------------------------
-// Очередь и отмена
+// Очередь, отмена и возобновление
 // --------------------------------------------------
 
 impl App {
@@ -643,6 +798,18 @@ impl App {
 
             for line in running.lines.try_iter() {
                 update_progress(&line, &mut item.percent, &mut item.speed, &mut item.eta);
+
+                if line.starts_with("[EmbedThumbnail]") && line.contains("Adding thumbnail") {
+                    item.cover_embedded = true;
+                }
+
+                let lower = line.to_lowercase();
+
+                if (lower.starts_with("error:") || lower.starts_with("warning:"))
+                    && lower.contains("thumbnail")
+                {
+                    item.cover_problem = true;
+                }
 
                 item.message = line.clone();
                 item.logs.push(line);
@@ -678,7 +845,14 @@ impl App {
 
             if let Some(result) = completion {
                 if let Some(running) = item.running.as_ref() {
-                    item.logs.extend(running.lines.try_iter());
+                    for line in running.lines.try_iter() {
+                        if line.starts_with("[EmbedThumbnail]") && line.contains("Adding thumbnail")
+                        {
+                            item.cover_embedded = true;
+                        }
+
+                        item.logs.push(line);
+                    }
                 }
 
                 trim_logs(&mut item.logs);
@@ -689,7 +863,11 @@ impl App {
                         item.status = Status::Completed;
                         item.percent = 1.0;
 
-                        item.message = if item.download_playlist {
+                        item.message = if item.embed_cover && !item.cover_embedded {
+                            "Видео сохранено, но yt-dlp не подтвердил \
+                             встраивание обложки. Проверьте журнал."
+                                .to_owned()
+                        } else if item.download_playlist {
                             "Обработка плейлиста завершена. \
                              Проверьте журнал."
                                 .to_owned()
@@ -749,6 +927,42 @@ impl App {
         item.running = None;
         item.status = Status::Cancelled;
         item.message = "Отменено. Скачанные и незавершённые файлы оставлены.".to_owned();
+    }
+
+    fn resume(&mut self, id: u64) {
+        let Some(item) = self.items.iter_mut().find(|item| item.id == id) else {
+            return;
+        };
+
+        if !matches!(
+            item.status,
+            Status::Failed | Status::Cancelled | Status::Interrupted
+        ) {
+            return;
+        }
+
+        item.running = None;
+        item.status = Status::Waiting;
+        item.percent = 0.0;
+        item.speed.clear();
+        item.eta.clear();
+        item.cover_embedded = false;
+        item.cover_problem = false;
+        item.message = "Ожидает повторного запуска.".to_owned();
+        item.logs.push("--- Повторный запуск ---".to_owned());
+    }
+
+    fn resume_all(&mut self) {
+        let ids: Vec<u64> = self
+            .items
+            .iter()
+            .filter(|item| item.status == Status::Interrupted)
+            .map(|item| item.id)
+            .collect();
+
+        for id in ids {
+            self.resume(id);
+        }
     }
 }
 
@@ -895,6 +1109,7 @@ impl App {
 impl eframe::App for App {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, SETTINGS_KEY, &self.settings);
+        eframe::set_value(storage, JOBS_KEY, &self.saved_jobs());
     }
 
     fn auto_save_interval(&self) -> Duration {
@@ -917,7 +1132,7 @@ impl eframe::App for App {
         }
 
         egui::SidePanel::left("sidebar")
-            .exact_width(200.0)
+            .exact_width(210.0)
             .show(ctx, |ui| {
                 ui.add_space(16.0);
                 ui.heading("VideoLoader");
@@ -933,8 +1148,22 @@ impl eframe::App for App {
                     self.open_folder();
                 }
 
+                let interrupted = self
+                    .items
+                    .iter()
+                    .filter(|item| item.status == Status::Interrupted)
+                    .count();
+
+                if interrupted > 0
+                    && ui
+                        .button(format!("Возобновить всё ({interrupted})"))
+                        .clicked()
+                {
+                    self.resume_all();
+                }
+
                 if ui.button("Очистить завершённые").clicked() {
-                    self.items.retain(|item| item.status.active());
+                    self.items.retain(|item| item.status.pending());
                 }
 
                 let waiting = self
@@ -952,6 +1181,7 @@ impl eframe::App for App {
                 ui.add_space(20.0);
                 ui.small(format!("Всего задач: {}", self.items.len()));
                 ui.small(format!("Ожидают: {waiting}"));
+                ui.small(format!("Прервано: {interrupted}"));
                 ui.small(format!("Завершены: {completed}"));
             });
 
@@ -1192,10 +1422,11 @@ impl App {
         });
 
         ui.add_space(18.0);
-        ui.heading("Очередь");
+        ui.heading("Очередь и история");
         ui.small(
             "Задачи выполняются последовательно. \
-             Видео внутри плейлиста тоже скачиваются по порядку.",
+             Очередь сохраняется между запусками; прерванные задачи \
+             нужно возобновить вручную.",
         );
         ui.add_space(10.0);
 
@@ -1203,7 +1434,7 @@ impl App {
     }
 
     fn show_queue(&mut self, ui: &mut egui::Ui) {
-        let mut cancel_id = None;
+        let mut action: Option<CardAction> = None;
 
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -1242,6 +1473,8 @@ impl App {
 
                             ui.label(format!("Озвучка: {}", item.audio_label));
 
+                            ui.small(format!("Папка: {}", item.output_dir.display()));
+
                             ui.small(match item.proxy.as_deref() {
                                 Some("") => "Подключение: напрямую",
                                 Some(_) => "Подключение: через прокси",
@@ -1254,6 +1487,29 @@ impl App {
                                 (false, true) => "Обложка: отдельным файлом",
                                 (false, false) => "Обложка: нет",
                             });
+
+                            if item.embed_cover && item.status == Status::Completed {
+                                if item.cover_embedded {
+                                    ui.small(
+                                        "Встраивание обложки: \
+                                         подтверждено журналом yt-dlp.",
+                                    );
+                                } else {
+                                    ui.colored_label(
+                                        egui::Color32::from_rgb(240, 120, 90),
+                                        "Встраивание обложки не \
+                                         подтверждено журналом yt-dlp.",
+                                    );
+                                }
+                            }
+
+                            if item.cover_problem {
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(240, 180, 90),
+                                    "В журнале есть предупреждение \
+                                     про обложку.",
+                                );
+                            }
 
                             if item.status == Status::Downloading {
                                 ui.add_space(8.0);
@@ -1280,9 +1536,32 @@ impl App {
 
                             ui.label(&item.message);
 
-                            if item.status.active() && ui.button("Отменить").clicked() {
-                                cancel_id = Some(item.id);
-                            }
+                            ui.horizontal_wrapped(|ui| {
+                                if item.status.active() && ui.button("Отменить").clicked() {
+                                    action = Some(CardAction::Cancel(item.id));
+                                }
+
+                                match item.status {
+                                    Status::Interrupted => {
+                                        if ui.button("Возобновить").clicked() {
+                                            action = Some(CardAction::Resume(item.id));
+                                        }
+                                    }
+
+                                    Status::Failed | Status::Cancelled => {
+                                        if ui.button("Повторить").clicked() {
+                                            action = Some(CardAction::Resume(item.id));
+                                        }
+                                    }
+
+                                    _ => {}
+                                }
+
+                                if !item.status.active() && ui.button("Удалить из списка").clicked()
+                                {
+                                    action = Some(CardAction::Remove(item.id));
+                                }
+                            });
 
                             ui.collapsing("Журнал", |ui| {
                                 egui::ScrollArea::vertical()
@@ -1301,8 +1580,15 @@ impl App {
                 }
             });
 
-        if let Some(id) = cancel_id {
-            self.cancel(id);
+        match action {
+            Some(CardAction::Cancel(id)) => self.cancel(id),
+            Some(CardAction::Resume(id)) => self.resume(id),
+
+            Some(CardAction::Remove(id)) => {
+                self.items.retain(|item| item.id != id);
+            }
+
+            None => {}
         }
     }
 
@@ -1506,6 +1792,27 @@ impl App {
 
         ui.add_space(16.0);
         ui.separator();
+        ui.heading("Обложки");
+
+        ui.small(
+            "MKV: yt-dlp прикрепляет jpg как вложение. Не все плеера \
+             и файловые менеджеры показывают его.",
+        );
+
+        ui.small(
+            "MP4: yt-dlp пробует mutagen, AtomicParsley и ffmpeg. \
+             Если встраивание не подтверждено, установите недостающие \
+             инструменты (для Arch/Omarchy проверьте названия \
+             командой pacman -Ss mutagen и pacman -Ss atomicparsley).",
+        );
+
+        ui.small(
+            "Проверка файла: ffprobe -hide_banner файл.mkv \
+             (без -select_streams v: вложения иначе не видны).",
+        );
+
+        ui.add_space(16.0);
+        ui.separator();
 
         if ui
             .add_enabled(
@@ -1543,11 +1850,14 @@ impl App {
 
         ui.add_space(16.0);
         ui.small(
-            "Настройки сохраняются автоматически \
+            "Настройки и очередь сохраняются автоматически \
              и при штатном закрытии приложения.",
         );
 
-        ui.small("Очередь загрузок пока не сохраняется между запусками.");
+        ui.small(format!(
+            "История хранит не более {MAX_HISTORY} завершённых задач; \
+             для каждой — последние {SAVED_LOG_LINES} строк журнала."
+        ));
     }
 }
 
@@ -2037,7 +2347,7 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("VideoLoader")
-            .with_inner_size([1180.0, 980.0])
+            .with_inner_size([1180.0, 1000.0])
             .with_min_inner_size([850.0, 780.0]),
         ..Default::default()
     };
