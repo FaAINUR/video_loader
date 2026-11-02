@@ -94,12 +94,6 @@ impl App {
         }
     }
 
-    fn browser_setting(&self) -> Option<String> {
-        self.settings
-            .use_browser_cookies
-            .then(|| self.settings.browser.clone())
-    }
-
     fn reset_audio(&mut self) {
         self.audio_options.clear();
         self.selected_audio = None;
@@ -154,7 +148,7 @@ impl App {
             return;
         }
 
-        let browser = self.browser_setting();
+        let browser = rules::browser_for(&self.settings, &url);
         let proxy = rules::proxy_for(&self.settings, &url);
         let (sender, receiver) = mpsc::channel();
 
@@ -203,7 +197,12 @@ impl App {
                         self.audio_options = options;
                     }
 
-                    Err(error) => self.audio_status = error,
+                    Err(error) => {
+                        self.audio_status = match crate::diagnostics::explain(&error) {
+                            Some(message) => format!("{message}\n\nИсходное сообщение:\n{error}"),
+                            None => error,
+                        };
+                    }
                 }
             }
 
@@ -251,8 +250,6 @@ impl App {
 
         let (urls, duplicates) = rules::dedupe_urls(urls);
 
-        let browser = self.browser_setting();
-
         let audio_id = self.selected_audio.as_ref().map(|audio| audio.id.clone());
 
         let audio_label = self
@@ -281,7 +278,7 @@ impl App {
                 container: self.settings.container,
                 playlist,
                 audio_id: audio_id.clone(),
-                browser: browser.clone(),
+                browser: rules::browser_for(&self.settings, &url),
                 proxy: rules::proxy_for(&self.settings, &url),
                 embed_cover: self.settings.embed_cover,
                 save_cover: self.settings.save_cover,

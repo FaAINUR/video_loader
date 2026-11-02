@@ -1,4 +1,5 @@
 mod app;
+mod diagnostics;
 mod jobs;
 mod models;
 mod platform;

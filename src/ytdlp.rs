@@ -78,6 +78,7 @@ pub fn info_args(url: &str, browser: Option<&str>, proxy: Option<&str>) -> Vec<S
     .map(|part| (*part).to_owned())
     .collect();
 
+    let browser = browser.filter(|_| crate::rules::is_youtube(url));
     push_connection(&mut args, browser, proxy);
 
     args.push("--".to_owned());
@@ -108,7 +109,11 @@ pub fn download_args(spec: &DownloadSpec) -> Vec<String> {
         args.push("--no-playlist".to_owned());
     }
 
-    push_connection(&mut args, spec.browser.as_deref(), spec.proxy.as_deref());
+    let browser = spec
+        .browser
+        .as_deref()
+        .filter(|_| crate::rules::is_youtube(&spec.url));
+    push_connection(&mut args, browser, spec.proxy.as_deref());
 
     if spec.embed_cover {
         args.push("--embed-thumbnail".to_owned());
@@ -503,6 +508,7 @@ mod tests {
     #[test]
     fn proxy_and_cookies_are_passed() {
         let mut spec = sample_spec();
+        spec.url = "https://youtu.be/test".to_owned();
         spec.proxy = Some("socks5h://127.0.0.1:12334".to_owned());
         spec.browser = Some("firefox".to_owned());
 
@@ -663,5 +669,24 @@ mod tests {
 
         assert!(options[0].label.contains("de"));
         assert!(options[1].label.contains("Язык не указан"));
+    }
+}
+
+#[cfg(test)]
+mod cookies_guard_tests {
+    use super::*;
+    #[test]
+    fn non_youtube_ignores_saved_browser() {
+        let mut spec = sample_spec();
+        spec.browser = Some("firefox".to_owned());
+        assert!(!download_args(&spec)
+            .iter()
+            .any(|a| a == "--cookies-from-browser"));
+        assert!(!info_args(&spec.url, Some("firefox"), None)
+            .iter()
+            .any(|a| a == "--cookies-from-browser"));
+        assert!(info_args("https://youtu.be/x", Some("firefox"), None)
+            .iter()
+            .any(|a| a == "--cookies-from-browser"));
     }
 }

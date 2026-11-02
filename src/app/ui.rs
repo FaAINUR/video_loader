@@ -561,7 +561,7 @@ impl App {
             changed |= ui
                 .checkbox(
                     &mut self.settings.use_browser_cookies,
-                    "Использовать cookies браузера",
+                    "Использовать cookies браузера для YouTube",
                 )
                 .changed();
 

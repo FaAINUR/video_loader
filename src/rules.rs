@@ -408,3 +408,32 @@ mod tests {
         );
     }
 }
+
+/// Cookies браузера используются только для ссылок YouTube.
+pub fn browser_for(settings: &Settings, url: &str) -> Option<String> {
+    (settings.use_browser_cookies && is_youtube(url)).then(|| settings.browser.clone())
+}
+
+#[cfg(test)]
+mod cookies_tests {
+    use super::*;
+
+    #[test]
+    fn cookies_only_for_youtube() {
+        let mut s = Settings::default();
+        s.use_browser_cookies = true;
+        assert_eq!(
+            browser_for(&s, "https://youtu.be/x"),
+            Some(s.browser.clone())
+        );
+        for url in [
+            "https://vkvideo.ru/x",
+            "https://rutube.ru/x",
+            "https://youtube.com.evil.example/x",
+        ] {
+            assert_eq!(browser_for(&s, url), None);
+        }
+        s.use_browser_cookies = false;
+        assert_eq!(browser_for(&s, "https://youtube.com/watch?v=x"), None);
+    }
+}

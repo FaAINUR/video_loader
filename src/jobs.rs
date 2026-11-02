@@ -96,7 +96,7 @@ impl DownloadItem {
     pub fn fail(&mut self, error: String) {
         self.running = None;
         self.status = Status::Failed;
-        self.message = error.clone();
+        self.message = crate::diagnostics::failure_message(&[], &error);
         self.logs.push(error);
         trim_logs(&mut self.logs);
     }
@@ -123,7 +123,9 @@ impl DownloadItem {
 
             Err(error) => {
                 self.status = Status::Failed;
-                self.message = error;
+                self.message = crate::diagnostics::failure_message(&self.logs, &error);
+                self.logs.push(error);
+                trim_logs(&mut self.logs);
             }
         }
     }
@@ -404,7 +406,8 @@ mod tests {
         item.finish(Err("boom".to_owned()));
 
         assert_eq!(item.status, Status::Failed);
-        assert_eq!(item.message, "boom");
+        assert_eq!(item.message, crate::diagnostics::UNKNOWN);
+        assert_eq!(item.logs.last().map(String::as_str), Some("boom"));
     }
 
     #[test]
@@ -555,5 +558,22 @@ mod tests {
         ];
 
         assert_eq!(saved_jobs(&items, 200, 10).len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod friendly_error_tests {
+    use super::*;
+    #[test]
+    fn specific_error_survives_process_exit() {
+        let mut item = DownloadItem::new(1, sample_spec(), "auto".into());
+        item.apply_line("ERROR: Requested format is not available".into());
+        item.apply_line("[info] cleanup".into());
+        item.finish(Err("exit 1".into()));
+        assert!(item.message.contains("качество"));
+        assert!(item.logs.iter().any(|s| s.contains("Requested format")));
+        assert!(item.resume());
+        item.finish(Err("new unknown error".into()));
+        assert_eq!(item.message, crate::diagnostics::UNKNOWN);
     }
 }
