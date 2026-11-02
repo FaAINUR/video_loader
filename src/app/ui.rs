@@ -77,6 +77,21 @@ impl App {
     }
 
     pub(super) fn show_downloads(&mut self, ui: &mut egui::Ui) {
+        if self
+            .dependencies
+            .as_ref()
+            .is_some_and(|r| r.needs_attention())
+        {
+            ui.horizontal_wrapped(|ui| {
+                ui.colored_label(
+                    egui::Color32::from_rgb(240, 180, 90),
+                    "Окружение требует внимания.",
+                );
+                if ui.button("Зависимости").clicked() {
+                    self.page = Page::Settings;
+                }
+            });
+        }
         ui.heading("Новые загрузки");
         ui.add_space(12.0);
 
@@ -668,39 +683,7 @@ impl App {
         ui.add_space(16.0);
         ui.separator();
 
-        if ui
-            .add_enabled(
-                self.dependency_receiver.is_none(),
-                egui::Button::new("Проверить yt-dlp и FFmpeg"),
-            )
-            .clicked()
-        {
-            self.check_dependencies();
-        }
-
-        if self.dependency_receiver.is_some() {
-            ui.spinner();
-        }
-
-        if let Some((yt_dlp, ffmpeg)) = self.dependencies {
-            ui.label(format!(
-                "yt-dlp: {}",
-                if yt_dlp {
-                    "найден"
-                } else {
-                    "не найден"
-                }
-            ));
-
-            ui.label(format!(
-                "FFmpeg: {}",
-                if ffmpeg {
-                    "найден"
-                } else {
-                    "не найден"
-                }
-            ));
-        }
+        self.show_dependencies(ui);
 
         ui.add_space(16.0);
         ui.small(
@@ -866,5 +849,103 @@ impl App {
             }
         }
         ui.small("После анализа список качества заменяет пресеты. Совместимость проверяется перед добавлением.");
+    }
+}
+
+impl App {
+    fn show_dependencies(&mut self, ui: &mut egui::Ui) {
+        use crate::dependencies::State;
+        ui.heading("Зависимости");
+        if ui
+            .add_enabled(
+                self.dependency_receiver.is_none() && self.install_receiver.is_none(),
+                egui::Button::new("Проверить окружение повторно"),
+            )
+            .clicked()
+        {
+            self.check_dependencies();
+        }
+        if self.dependency_receiver.is_some() {
+            ui.spinner();
+            ui.label("Проверяем программы и версии...");
+        }
+        if self.install_receiver.is_some() {
+            ui.spinner();
+            ui.label("Ожидаем закрытия терминала установки.");
+        }
+        let Some(report) = &self.dependencies else {
+            return;
+        };
+        for entry in &report.entries {
+            let state = match entry.state {
+                State::Ready => "Найден / проверен",
+                State::Missing => "Не найден",
+                State::Broken => "Ошибка проверки или запуска",
+                State::Timeout => "Тайм-аут",
+                State::Unverified => "Не проверен",
+            };
+            ui.label(format!("{} — {}", entry.name, state));
+            ui.small(&entry.detail);
+            if let Some(path) = &entry.path {
+                ui.monospace(path.to_string_lossy().into_owned());
+            }
+        }
+        ui.small("Наличие компонентов не гарантирует доступ к сайту. Для проверки YouTube проанализируйте ссылку.");
+        ui.small("Версия Deno отображается для диагностики; совместимость с установленной версией yt-dlp требует проверки на реальной ссылке.");
+        let packages = report.packages();
+        if report.arch && !packages.is_empty() {
+            if let Ok(command) = crate::dependencies::install_command(&packages) {
+                ui.separator();
+                ui.label("Предлагаемая команда установки:");
+                ui.monospace(&command);
+                ui.colored_label(egui::Color32::from_rgb(240,180,90),
+                    "Внимание: -Syu обновляет всю систему. Прочитайте вывод pacman перед подтверждением.");
+                if ui.button("Скопировать команду").clicked() {
+                    ui.ctx().copy_text(command);
+                }
+                let can_install = self.install_receiver.is_none()
+                    && self.dependency_receiver.is_none()
+                    && !self.items.iter().any(|i| i.running.is_some());
+                if ui
+                    .add_enabled(can_install, egui::Button::new("Установить зависимости…"))
+                    .clicked()
+                {
+                    self.install_packages = packages.iter().map(|p| (*p).to_owned()).collect();
+                    self.install_confirmation = true;
+                }
+                ui.small("Уже установленные пакеты с --needed не переустанавливаются. Установка доступна после завершения текущей загрузки. PATH после установки может по-прежнему указывать на другую копию программы — смотрите пути выше.");
+            }
+        } else if !report.arch {
+            ui.small("Автоустановка доступна только в Arch / Omarchy. На других системах установите компоненты вручную и проверьте PATH.");
+        }
+    }
+    pub(super) fn show_installation_confirmation(&mut self, ctx: &egui::Context) {
+        if !self.install_confirmation {
+            return;
+        }
+        let refs: Vec<&str> = self.install_packages.iter().map(String::as_str).collect();
+        let Ok(command) = crate::dependencies::install_command(&refs) else {
+            self.install_confirmation = false;
+            return;
+        };
+        let mut open = true;
+        let mut install = false;
+        let mut cancel = false;
+        egui::Window::new("Подтверждение установки зависимостей").open(&mut open)
+            .collapsible(false).resizable(true).default_width(620.0).show(ctx,|ui| {
+                ui.label("Будет открыт терминал со следующей командой:");
+                ui.monospace(&command);
+                ui.label("Команда включает полное обновление системы. Потребуются интернет и подтверждение pacman. Проверьте список пакетов в терминале.");
+                ui.label("Пароль вводится только в терминале для sudo; приложение его не получает. Очередь будет поставлена на паузу и останется на паузе после установки.");
+                ui.horizontal(|ui| {
+                    if ui.button("Подтвердить и открыть терминал").clicked() { install=true; }
+                    if ui.button("Отмена").clicked() { cancel=true; }
+                    if ui.button("Скопировать команду").clicked() { ctx.copy_text(command.clone()); }
+                });
+            });
+        self.install_confirmation = open && !install && !cancel;
+        if install {
+            self.start_installation();
+        }
     }
 }

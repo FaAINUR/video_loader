@@ -71,20 +71,6 @@ pub fn kill_process_tree(process_id: u32) -> Result<(), String> {
     }
 }
 
-pub fn check_command(program: &str, argument: &str) -> bool {
-    let mut command = Command::new(program);
-    hide_console(&mut command);
-
-    command
-        .arg(argument)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
-}
-
 #[cfg(target_os = "linux")]
 fn opener() -> Option<Command> {
     Some(Command::new("xdg-open"))

@@ -2,7 +2,6 @@
 
 use crate::models::*;
 use crate::platform;
-use serde_json::Value;
 use std::io::{BufRead, BufReader, Read};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -160,87 +159,6 @@ pub fn download_args(spec: &DownloadSpec) -> Vec<String> {
 // --------------------------------------------------
 // Аудиодорожки
 // --------------------------------------------------
-
-fn field<'a>(value: &'a Value, name: &str) -> &'a str {
-    value.get(name).and_then(Value::as_str).unwrap_or("")
-}
-
-pub fn parse_audio_options(json: &[u8]) -> Result<Vec<AudioOption>, String> {
-    let data: Value =
-        serde_json::from_slice(json).map_err(|error| format!("Ошибка разбора JSON: {error}"))?;
-
-    let formats = data
-        .get("formats")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "yt-dlp не вернул список форматов.".to_owned())?;
-
-    let mut options = Vec::new();
-
-    for format in formats {
-        let id = field(format, "format_id");
-        let vcodec = field(format, "vcodec");
-        let acodec = field(format, "acodec");
-
-        if id.is_empty()
-            || acodec.is_empty()
-            || acodec == "none"
-            || (!vcodec.is_empty() && vcodec != "none")
-        {
-            continue;
-        }
-
-        let language = field(format, "language");
-
-        let language_name = if language.starts_with("ru") {
-            "Русский"
-        } else if language.starts_with("en") {
-            "Английский"
-        } else if language.is_empty() {
-            "Язык не указан"
-        } else {
-            language
-        };
-
-        let webm_compatible = acodec.starts_with("opus") || acodec.starts_with("vorbis");
-
-        let mut parts = vec![language_name.to_owned()];
-
-        let note = field(format, "format_note");
-
-        if !note.is_empty() {
-            parts.push(note.to_owned());
-        }
-
-        parts.push(acodec.to_owned());
-
-        if let Some(abr) = format.get("abr").and_then(Value::as_f64) {
-            parts.push(format!("{abr:.0} кбит/с"));
-        }
-
-        if webm_compatible {
-            parts.push("подходит для WebM".to_owned());
-        }
-
-        parts.push(format!("ID: {id}"));
-
-        options.push(AudioOption {
-            id: id.to_owned(),
-            label: parts.join(" • "),
-            webm_compatible,
-        });
-    }
-
-    options.reverse();
-    Ok(options)
-}
-
-pub fn load_audio_options(
-    url: &str,
-    browser: Option<&str>,
-    proxy: Option<&str>,
-) -> Result<Vec<AudioOption>, String> {
-    parse_audio_options(&load_info_json(url, browser, proxy)?)
-}
 
 pub fn load_info_json(
     url: &str,
@@ -414,7 +332,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     fn value_after<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
         let index = args.iter().position(|arg| arg == flag)?;
@@ -605,78 +522,6 @@ mod tests {
         assert_eq!(value_after(&args, "--proxy"), Some(""));
         assert_eq!(args[n - 2], "--");
         assert_eq!(args[n - 1], "https://example.org/v");
-    }
-
-    // ---------- разбор аудиоформатов ----------
-
-    #[test]
-    fn audio_only_formats_are_selected() {
-        let data = json!({
-            "formats": [
-                {"format_id": "137", "vcodec": "avc1", "acodec": "none"},
-                {
-                    "format_id": "140", "vcodec": "none",
-                    "acodec": "mp4a.40.2", "language": "en",
-                    "format_note": "medium", "abr": 129.5
-                },
-                {
-                    "format_id": "251", "vcodec": "none",
-                    "acodec": "opus", "language": "ru",
-                    "format_note": "medium", "abr": 130.0
-                },
-                {"format_id": "18", "vcodec": "avc1", "acodec": "mp4a.40.2"},
-                {"vcodec": "none", "acodec": "opus"}
-            ]
-        });
-
-        let bytes = serde_json::to_vec(&data).unwrap();
-        let options = parse_audio_options(&bytes).unwrap();
-
-        let ids: Vec<&str> = options.iter().map(|option| option.id.as_str()).collect();
-
-        // Порядок обратный порядку yt-dlp.
-        assert_eq!(ids, vec!["251", "140"]);
-
-        assert!(options[0].webm_compatible);
-        assert!(options[0].label.contains("Русский"));
-        assert!(options[0].label.contains("ID: 251"));
-
-        assert!(!options[1].webm_compatible);
-        assert!(options[1].label.contains("Английский"));
-    }
-
-    #[test]
-    fn no_audio_formats_gives_empty_list() {
-        let bytes = serde_json::to_vec(&json!({"formats": []})).unwrap();
-
-        assert!(parse_audio_options(&bytes).unwrap().is_empty());
-    }
-
-    #[test]
-    fn broken_json_is_error() {
-        assert!(parse_audio_options(b"not json").is_err());
-    }
-
-    #[test]
-    fn missing_formats_is_error() {
-        let bytes = serde_json::to_vec(&json!({"title": "x"})).unwrap();
-
-        assert!(parse_audio_options(&bytes).is_err());
-    }
-
-    #[test]
-    fn language_is_shown_when_unknown() {
-        let data = json!({"formats": [
-            {"format_id": "a1", "vcodec": "none", "acodec": "opus"},
-            {"format_id": "a2", "vcodec": "none", "acodec": "opus",
-             "language": "de"}
-        ]});
-
-        let bytes = serde_json::to_vec(&data).unwrap();
-        let options = parse_audio_options(&bytes).unwrap();
-
-        assert!(options[0].label.contains("de"));
-        assert!(options[1].label.contains("Язык не указан"));
     }
 }
 

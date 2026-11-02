@@ -345,3 +345,68 @@ mod tests {
         );
     }
 }
+
+// Проверки бывшего аудиопарсера перенесены на рабочую реализацию MediaInfo.
+#[cfg(test)]
+mod audio_regression_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn parse_value(value: Value) -> MediaInfo {
+        parse(&serde_json::to_vec(&value).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn audio_selection_ignores_video_and_muxed_formats() {
+        let info = parse_value(json!({"formats":[
+            {"format_id":"137","vcodec":"avc1","acodec":"none"},
+            {"format_id":"140","vcodec":"none","acodec":"mp4a.40.2","language":"en"},
+            {"format_id":"251","vcodec":"none","acodec":"opus","language":"ru"},
+            {"format_id":"18","vcodec":"avc1","acodec":"mp4a.40.2","language":"de"},
+            {"vcodec":"none","acodec":"opus","language":"fr"}
+        ]}));
+        assert_eq!(info.languages(), vec!["en", "ru"]);
+        let ru = info.audio_option(Some("ru"), None, false).unwrap().unwrap();
+        assert_eq!(ru.id, "251");
+        assert!(ru.webm_compatible);
+        assert!(ru.label.contains("Русский"));
+        let en = info.audio_option(Some("en"), None, false).unwrap().unwrap();
+        assert_eq!(en.id, "140");
+        assert!(!en.webm_compatible);
+        assert!(en.label.contains("Английский"));
+    }
+
+    #[test]
+    fn video_without_separate_audio_has_no_audio_groups() {
+        let info = parse_value(json!({"formats":[
+            {"format_id":"18","vcodec":"avc1","acodec":"aac"}
+        ]}));
+        assert!(info.languages().is_empty());
+        assert!(info.audio_option(None, None, false).unwrap().is_none());
+    }
+
+    #[test]
+    fn malformed_audio_json_is_rejected() {
+        assert!(parse(b"not json").is_err());
+    }
+
+    #[test]
+    fn missing_formats_is_rejected() {
+        assert!(parse(br#"{"title":"x"}"#).is_err());
+    }
+
+    #[test]
+    fn unknown_and_missing_languages_remain_selectable() {
+        let info = parse_value(json!({"formats":[
+            {"format_id":"a1","vcodec":"none","acodec":"opus"},
+            {"format_id":"a2","vcodec":"none","acodec":"opus","language":"de"}
+        ]}));
+        assert_eq!(info.languages(), vec!["", "de"]);
+        let unknown = info.audio_option(Some(""), None, false).unwrap().unwrap();
+        let german = info.audio_option(Some("de"), None, false).unwrap().unwrap();
+        assert_eq!(unknown.id, "a1");
+        assert!(unknown.label.contains("Язык не указан"));
+        assert_eq!(german.id, "a2");
+        assert!(german.label.contains("de"));
+    }
+}

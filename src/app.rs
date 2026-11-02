@@ -58,8 +58,12 @@ pub struct App {
     items: Vec<DownloadItem>,
     queue_state: crate::queue::QueueState,
 
-    dependency_receiver: Option<Receiver<(bool, bool)>>,
-    dependencies: Option<(bool, bool)>,
+    dependency_receiver: Option<Receiver<crate::dependencies::Report>>,
+    dependencies: Option<crate::dependencies::Report>,
+    dependency_started: bool,
+    install_confirmation: bool,
+    install_packages: Vec<String>,
+    install_receiver: Option<Receiver<Result<(), String>>>,
 }
 
 impl App {
@@ -107,6 +111,10 @@ impl App {
 
             dependency_receiver: None,
             dependencies: None,
+            dependency_started: false,
+            install_confirmation: false,
+            install_packages: Vec::new(),
+            install_receiver: None,
         }
     }
 
@@ -391,6 +399,9 @@ impl App {
             }
         }
 
+        if self.install_receiver.is_some() {
+            return;
+        }
         if let Some(index) = crate::queue::next_waiting(&self.items, &self.queue_state) {
             let item = &mut self.items[index];
             match RunningDownload::start(&item.spec) {
@@ -491,10 +502,7 @@ impl App {
         self.dependency_receiver = Some(receiver);
 
         thread::spawn(move || {
-            let result = (
-                platform::check_command("yt-dlp", "--version"),
-                platform::check_command("ffmpeg", "-version"),
-            );
+            let result = crate::dependencies::check();
 
             let _ = sender.send(result);
         });
@@ -516,6 +524,7 @@ impl App {
 
             Err(mpsc::TryRecvError::Disconnected) => {
                 self.dependency_receiver = None;
+                self.notice = "Проверка окружения завершилась без результата. Повторите проверку в настройках.".into();
             }
         }
     }
@@ -538,6 +547,11 @@ impl eframe::App for App {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if !self.dependency_started {
+            self.dependency_started = true;
+            self.check_dependencies();
+        }
+        self.poll_installation();
         self.poll_audio();
         self.poll_downloads();
         self.poll_folder_selection();
@@ -546,6 +560,7 @@ impl eframe::App for App {
         let busy = self.audio_receiver.is_some()
             || self.folder_receiver.is_some()
             || self.dependency_receiver.is_some()
+            || self.install_receiver.is_some()
             || self.items.iter().any(|item| {
                 item.running.is_some()
                     || (!self.queue_state.paused && item.status == Status::Waiting)
@@ -575,5 +590,53 @@ impl eframe::App for App {
         });
 
         self.show_audio_dialog(ctx);
+        self.show_installation_confirmation(ctx);
+    }
+}
+
+impl App {
+    fn start_installation(&mut self) {
+        if self.install_receiver.is_some() || self.items.iter().any(|i| i.running.is_some()) {
+            self.notice = "Дождитесь завершения текущей загрузки перед установкой.".into();
+            return;
+        }
+        let packages = self.install_packages.clone();
+        if crate::dependencies::install_command(
+            &packages.iter().map(String::as_str).collect::<Vec<_>>(),
+        )
+        .is_err()
+        {
+            return;
+        }
+        self.queue_state.paused = true;
+        let (sender, receiver) = mpsc::channel();
+        self.install_receiver = Some(receiver);
+        self.notice =
+            "Установка открывается в отдельном терминале. Очередь поставлена на паузу.".into();
+        thread::spawn(move || {
+            let refs: Vec<&str> = packages.iter().map(String::as_str).collect();
+            let _ = sender.send(crate::dependencies::install_in_terminal(&refs));
+        });
+    }
+    fn poll_installation(&mut self) {
+        let result = match &self.install_receiver {
+            Some(r) => r.try_recv(),
+            None => return,
+        };
+        match result {
+            Ok(result) => {
+                self.install_receiver = None;
+                self.notice=match result {
+                    Ok(())=>"Окно установки закрыто. Выполняется повторная проверка. Очередь остаётся на паузе.".into(),
+                    Err(e)=>e,
+                };
+                self.check_dependencies();
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.install_receiver = None;
+                self.notice = "Ожидание установки прервано. Проверьте окружение повторно.".into();
+            }
+        }
     }
 }

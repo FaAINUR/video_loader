@@ -1,4 +1,5 @@
 mod app;
+mod dependencies;
 mod diagnostics;
 mod jobs;
 mod media;
