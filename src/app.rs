@@ -15,6 +15,7 @@ use std::time::Duration;
 
 const SETTINGS_KEY: &str = "video_loader_settings_v1";
 const JOBS_KEY: &str = "video_loader_jobs_v1";
+const QUEUE_KEY: &str = "video_loader_queue_v1";
 
 #[derive(Clone, Copy, PartialEq)]
 enum Page {
@@ -26,6 +27,7 @@ enum CardAction {
     Cancel(u64),
     Resume(u64),
     Remove(u64),
+    Move(u64, crate::queue::Move),
 }
 
 struct AudioResult {
@@ -54,6 +56,7 @@ pub struct App {
 
     next_id: u64,
     items: Vec<DownloadItem>,
+    queue_state: crate::queue::QueueState,
 
     dependency_receiver: Option<Receiver<(bool, bool)>>,
     dependencies: Option<(bool, bool)>,
@@ -74,6 +77,10 @@ impl App {
             .unwrap_or_default();
 
         let (items, next_id) = jobs::restore_items(saved);
+        let queue_state = cc
+            .storage
+            .and_then(|storage| eframe::get_value(storage, QUEUE_KEY))
+            .unwrap_or_default();
 
         Self {
             page: Page::Downloads,
@@ -96,6 +103,7 @@ impl App {
 
             next_id,
             items,
+            queue_state,
 
             dependency_receiver: None,
             dependencies: None,
@@ -383,15 +391,8 @@ impl App {
             }
         }
 
-        if self.items.iter().any(|item| item.running.is_some()) {
-            return;
-        }
-
-        if let Some(item) = self
-            .items
-            .iter_mut()
-            .find(|item| item.status == Status::Waiting)
-        {
+        if let Some(index) = crate::queue::next_waiting(&self.items, &self.queue_state) {
+            let item = &mut self.items[index];
             match RunningDownload::start(&item.spec) {
                 Ok(running) => item.mark_started(running),
                 Err(error) => item.fail(error),
@@ -523,6 +524,7 @@ impl App {
 impl eframe::App for App {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, SETTINGS_KEY, &self.settings);
+        eframe::set_value(storage, QUEUE_KEY, &self.queue_state);
 
         eframe::set_value(
             storage,
@@ -544,7 +546,10 @@ impl eframe::App for App {
         let busy = self.audio_receiver.is_some()
             || self.folder_receiver.is_some()
             || self.dependency_receiver.is_some()
-            || self.items.iter().any(|item| item.status.active());
+            || self.items.iter().any(|item| {
+                item.running.is_some()
+                    || (!self.queue_state.paused && item.status == Status::Waiting)
+            });
 
         if busy {
             ctx.request_repaint_after(Duration::from_millis(100));

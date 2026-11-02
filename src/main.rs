@@ -5,6 +5,7 @@ mod media;
 mod models;
 mod platform;
 mod progress;
+mod queue;
 mod rules;
 mod ytdlp;
 

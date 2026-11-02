@@ -25,6 +25,19 @@ impl App {
                     self.open_folder();
                 }
 
+                let pause_label = if self.queue_state.paused {
+                    "Продолжить очередь"
+                } else {
+                    "Приостановить очередь"
+                };
+                if ui.button(pause_label).clicked() {
+                    self.queue_state.paused = !self.queue_state.paused;
+                    ctx.request_repaint();
+                }
+                if self.queue_state.paused {
+                    ui.small("Очередь на паузе. Текущая загрузка продолжается.");
+                }
+
                 let interrupted = self
                     .items
                     .iter()
@@ -237,9 +250,15 @@ impl App {
         ui.add_space(18.0);
         ui.heading("Очередь и история");
         ui.small(
-            "Задачи выполняются последовательно. Очередь сохраняется \
-             между запусками; прерванные задачи нужно возобновить вручную.",
+            "Задачи выполняются последовательно. Порядок и пауза сохраняются. \
+             Прерванные задачи нужно возобновить вручную.",
         );
+        if self.queue_state.paused {
+            ui.colored_label(
+                egui::Color32::from_rgb(240, 180, 90),
+                "Очередь приостановлена — новые задачи не запускаются.",
+            );
+        }
         ui.add_space(10.0);
 
         self.show_queue(ui);
@@ -360,6 +379,21 @@ impl App {
                             ui.label(&item.message);
 
                             ui.horizontal_wrapped(|ui| {
+                                if item.status == Status::Waiting {
+                                    let (up, down) = crate::queue::neighbors(&self.items, item.id);
+                                    for (label, enabled, movement) in [
+                                        ("Выше", up, crate::queue::Move::Up),
+                                        ("Ниже", down, crate::queue::Move::Down),
+                                        ("Следующей", up, crate::queue::Move::Next),
+                                    ] {
+                                        if ui
+                                            .add_enabled(enabled, egui::Button::new(label))
+                                            .clicked()
+                                        {
+                                            action = Some(CardAction::Move(item.id, movement));
+                                        }
+                                    }
+                                }
                                 if item.status.active() && ui.button("Отменить").clicked() {
                                     action = Some(CardAction::Cancel(item.id));
                                 }
@@ -406,6 +440,10 @@ impl App {
         match action {
             Some(CardAction::Cancel(id)) => self.cancel(id),
             Some(CardAction::Resume(id)) => self.resume(id),
+            Some(CardAction::Move(id, movement)) => {
+                crate::queue::move_waiting(&mut self.items, id, movement);
+                ui.ctx().request_repaint();
+            }
 
             Some(CardAction::Remove(id)) => {
                 self.items.retain(|item| item.id != id);
