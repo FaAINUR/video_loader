@@ -1,0 +1,60 @@
+name: Windows installer
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: '-C target-feature=+crt-static'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare Rust
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add x86_64-pc-windows-msvc --toolchain stable
+      - name: Test
+        shell: pwsh
+        run: |
+          cargo +stable test --locked --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build
+        shell: pwsh
+        run: |
+          cargo +stable build --release --locked --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Install Inno Setup if needed
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $toml = Get-Content Cargo.toml -Raw
+          $version = [regex]::Match($toml, '(?m)^version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"').Groups[1].Value
+          if (-not $version) { throw 'Cannot read application version' }
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            $iscc = (Get-ChildItem "${env:ProgramFiles(x86)}\Inno Setup*\ISCC.exe" | Select-Object -First 1).FullName
+          }
+          if (-not $iscc) { throw 'ISCC not found' }
+          & $iscc "/DAppVersion=$version" packaging/windows/setup.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-ChildItem dist/*.exe | ForEach-Object {
+            $hash = Get-FileHash $_.FullName -Algorithm SHA256
+            "$($hash.Hash)  $($_.Name)" | Set-Content ($_.FullName + '.sha256') -Encoding ascii
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VideoLoader-windows-x64-installer
+          path: |
+            dist/*.exe
+            dist/*.sha256
+          if-no-files-found: error
+          retention-days: 14
