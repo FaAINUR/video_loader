@@ -180,6 +180,7 @@ impl DownloadItem {
             container: self.spec.container,
             download_playlist: self.spec.playlist,
             audio_id: self.spec.audio_id.clone(),
+            format_override: self.spec.format_override.clone(),
             audio_label: self.audio_label.clone(),
             browser: self.spec.browser.clone(),
             proxy: self.spec.proxy.clone(),
@@ -213,6 +214,7 @@ impl DownloadItem {
                 container: job.container,
                 playlist: job.download_playlist,
                 audio_id: job.audio_id,
+                format_override: job.format_override,
                 browser: job.browser,
                 proxy: job.proxy,
                 embed_cover: job.embed_cover,
@@ -575,5 +577,19 @@ mod friendly_error_tests {
         assert!(item.resume());
         item.finish(Err("new unknown error".into()));
         assert_eq!(item.message, crate::diagnostics::UNKNOWN);
+    }
+}
+
+#[cfg(test)]
+mod analyzed_selection_tests {
+    use super::*;
+    #[test]
+    fn selection_survives_storage() {
+        let mut spec = sample_spec();
+        spec.format_override = Some("137+140".into());
+        let item = DownloadItem::new(1, spec, "Русский".into());
+        let json = serde_json::to_string(&item.to_saved(5)).unwrap();
+        let restored = DownloadItem::from_saved(serde_json::from_str(&json).unwrap());
+        assert_eq!(restored.spec.format_override.as_deref(), Some("137+140"));
     }
 }

@@ -30,7 +30,7 @@ enum CardAction {
 
 struct AudioResult {
     url: String,
-    result: Result<Vec<AudioOption>, String>,
+    result: Result<crate::media::MediaInfo, String>,
 }
 
 pub struct App {
@@ -41,6 +41,10 @@ pub struct App {
 
     folder_receiver: Option<Receiver<Option<PathBuf>>>,
 
+    media: Option<crate::media::MediaInfo>,
+    resolution: Option<usize>,
+    language: Option<String>,
+    track: Option<String>,
     audio_options: Vec<AudioOption>,
     selected_audio: Option<AudioOption>,
     temporary_audio_id: Option<String>,
@@ -79,6 +83,10 @@ impl App {
 
             folder_receiver: None,
 
+            media: None,
+            resolution: None,
+            language: None,
+            track: None,
             audio_options: Vec::new(),
             selected_audio: None,
             temporary_audio_id: None,
@@ -95,6 +103,12 @@ impl App {
     }
 
     fn reset_audio(&mut self) {
+        // Отсоединяем устаревший запрос: его результат больше не применяется.
+        self.audio_receiver = None;
+        self.media = None;
+        self.resolution = None;
+        self.language = None;
+        self.track = None;
         self.audio_options.clear();
         self.selected_audio = None;
         self.temporary_audio_id = None;
@@ -152,15 +166,15 @@ impl App {
         let proxy = rules::proxy_for(&self.settings, &url);
         let (sender, receiver) = mpsc::channel();
 
-        self.audio_options.clear();
-        self.temporary_audio_id = None;
+        self.reset_audio();
         self.audio_receiver = Some(receiver);
         self.audio_status = "Получаем список аудиодорожек...".to_owned();
-        self.show_audio_window = true;
+        self.show_audio_window = false;
         self.notice.clear();
 
         thread::spawn(move || {
-            let result = ytdlp::load_audio_options(&url, browser.as_deref(), proxy.as_deref());
+            let result = ytdlp::load_info_json(&url, browser.as_deref(), proxy.as_deref())
+                .and_then(|bytes| crate::media::parse(&bytes));
 
             let _ = sender.send(AudioResult { url, result });
         });
@@ -182,19 +196,10 @@ impl App {
                 }
 
                 match response.result {
-                    Ok(options) => {
-                        self.audio_status = if options.is_empty() {
-                            "Отдельные аудиоформаты не найдены. \
-                             Попробуйте автоматическую озвучку."
-                                .to_owned()
-                        } else {
-                            format!("Найдено аудиоформатов: {}.", options.len())
-                        };
-
-                        self.temporary_audio_id =
-                            self.selected_audio.as_ref().map(|audio| audio.id.clone());
-
-                        self.audio_options = options;
+                    Ok(info) => {
+                        self.audio_status = "Анализ завершён.".into();
+                        self.media = Some(info);
+                        self.settings.quality = Quality::Best;
                     }
 
                     Err(error) => {
@@ -230,6 +235,40 @@ impl App {
                 self.notice = error;
                 return;
             }
+        };
+
+        let format_override = if urls.len() == 1 && !self.settings.download_playlists {
+            if let Some(info) = &self.media {
+                let webm = self.settings.quality != Quality::AudioMp3
+                    && self.settings.container == VideoContainer::Webm;
+                self.selected_audio = match info.audio_option(
+                    self.language.as_deref(),
+                    self.track.as_deref(),
+                    webm,
+                ) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        self.notice = e;
+                        return;
+                    }
+                };
+                match info.selector(
+                    self.resolution.and_then(|i| info.resolutions.get(i)),
+                    self.settings.quality,
+                    self.settings.container,
+                    self.selected_audio.as_ref(),
+                ) {
+                    Ok(s) => Some(s),
+                    Err(e) => {
+                        self.notice = e;
+                        return;
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
         };
 
         if let Err(error) =
@@ -278,6 +317,7 @@ impl App {
                 container: self.settings.container,
                 playlist,
                 audio_id: audio_id.clone(),
+                format_override: format_override.clone(),
                 browser: rules::browser_for(&self.settings, &url),
                 proxy: rules::proxy_for(&self.settings, &url),
                 embed_cover: self.settings.embed_cover,

@@ -1,6 +1,7 @@
 mod app;
 mod diagnostics;
 mod jobs;
+mod media;
 mod models;
 mod platform;
 mod progress;

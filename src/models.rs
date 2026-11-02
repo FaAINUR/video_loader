@@ -164,6 +164,7 @@ pub struct DownloadSpec {
     pub container: VideoContainer,
     pub playlist: bool,
     pub audio_id: Option<String>,
+    pub format_override: Option<String>,
     pub browser: Option<String>,
     // None — не передавать --proxy; Some("") — напрямую; Some(адрес) — прокси.
     pub proxy: Option<String>,
@@ -182,6 +183,8 @@ pub struct SavedJob {
     pub download_playlist: bool,
     pub audio_id: Option<String>,
     pub audio_label: String,
+    #[serde(default)]
+    pub format_override: Option<String>,
     pub browser: Option<String>,
     #[serde(default)]
     pub proxy: Option<String>,
@@ -207,6 +210,7 @@ pub fn sample_spec() -> DownloadSpec {
         container: VideoContainer::Mkv,
         playlist: false,
         audio_id: None,
+        format_override: None,
         browser: None,
         proxy: None,
         embed_cover: false,

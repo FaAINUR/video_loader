@@ -131,20 +131,21 @@ impl App {
 
             ui.add_space(10.0);
 
-            ui.horizontal_wrapped(|ui| {
-                ui.label("Качество:");
+            ui.add_enabled_ui(self.media.is_none(), |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Пресет (без анализа):");
 
-                for quality in [
-                    Quality::Best,
-                    Quality::H1080,
-                    Quality::H720,
-                    Quality::H480,
-                    Quality::AudioMp3,
-                ] {
-                    ui.selectable_value(&mut self.settings.quality, quality, quality.label());
-                }
+                    for quality in [
+                        Quality::Best,
+                        Quality::H1080,
+                        Quality::H720,
+                        Quality::H480,
+                        Quality::AudioMp3,
+                    ] {
+                        ui.selectable_value(&mut self.settings.quality, quality, quality.label());
+                    }
+                });
             });
-
             ui.add_space(10.0);
 
             ui.add_enabled_ui(self.settings.quality != Quality::AudioMp3, |ui| {
@@ -204,50 +205,7 @@ impl App {
 
             ui.add_space(10.0);
 
-            let audio_label = self
-                .selected_audio
-                .as_ref()
-                .map(|audio| audio.label.as_str())
-                .unwrap_or("Автоматически")
-                .to_owned();
-
-            ui.horizontal_wrapped(|ui| {
-                ui.label(format!("Озвучка: {audio_label}"));
-
-                if ui
-                    .add_enabled(
-                        self.audio_receiver.is_none()
-                            && link_count == 1
-                            && !self.settings.download_playlists,
-                        egui::Button::new("Выбрать озвучку"),
-                    )
-                    .clicked()
-                {
-                    self.start_audio_selection();
-                }
-
-                if self.selected_audio.is_some() && ui.button("Сбросить").clicked() {
-                    self.reset_audio();
-                }
-            });
-
-            if link_count > 1 || self.settings.download_playlists {
-                ui.small(
-                    "Для группы и плейлистов озвучка автоматическая. \
-                     Качество, контейнер и папка общие.",
-                );
-            }
-
-            if self.audio_receiver.is_some() {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label("Получаем аудиодорожки...");
-                });
-
-                if ui.button("Показать окно озвучки").clicked() {
-                    self.show_audio_window = true;
-                }
-            }
+            self.show_media_card(ui, link_count);
 
             ui.add_space(12.0);
 
@@ -316,6 +274,9 @@ impl App {
 
                                 ui.separator();
                                 ui.label(item.spec.quality.label());
+                                if item.spec.format_override.is_some() {
+                                    ui.small("Форматы выбраны по анализу ссылки");
+                                }
                                 ui.separator();
 
                                 ui.label(if item.spec.quality == Quality::AudioMp3 {
@@ -705,5 +666,159 @@ impl App {
             "История хранит не более {MAX_HISTORY} завершённых задач; \
              для каждой — последние {SAVED_LOG_LINES} строк журнала."
         ));
+    }
+}
+
+impl App {
+    fn show_media_card(&mut self, ui: &mut egui::Ui, link_count: usize) {
+        let single = link_count == 1 && !self.settings.download_playlists;
+        if !single {
+            ui.small("Для группы ссылок и плейлистов используются общие пресеты и автоматическая озвучка.");
+            return;
+        }
+        if ui
+            .add_enabled(
+                self.audio_receiver.is_none(),
+                egui::Button::new("Анализировать ссылку"),
+            )
+            .clicked()
+        {
+            self.start_audio_selection();
+        }
+        if self.audio_receiver.is_some() {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Получаем информацию о видео...");
+            });
+        }
+        if !self.audio_status.is_empty() {
+            egui::ScrollArea::vertical()
+                .id_salt("analysis_status")
+                .max_height(90.0)
+                .show(ui, |ui| {
+                    ui.label(&self.audio_status);
+                });
+        }
+        let Some(info) = self.media.as_ref() else {
+            return;
+        };
+        ui.separator();
+        ui.label(egui::RichText::new(&info.title).strong());
+        ui.label(format!(
+            "Автор: {} · Длительность: {} · Источник: {}",
+            info.author, info.duration, info.site
+        ));
+        let current = if self.settings.quality == Quality::AudioMp3 {
+            "Только аудио (MP3)".into()
+        } else {
+            self.resolution
+                .and_then(|i| info.resolutions.get(i))
+                .map(|r| r.label())
+                .unwrap_or_else(|| "Максимальное доступное".into())
+        };
+        egui::ComboBox::from_id_salt("real_quality")
+            .selected_text(current)
+            .show_ui(ui, |ui| {
+                if ui
+                    .selectable_label(
+                        self.resolution.is_none() && self.settings.quality != Quality::AudioMp3,
+                        "Максимальное доступное",
+                    )
+                    .clicked()
+                {
+                    self.resolution = None;
+                    self.settings.quality = Quality::Best;
+                }
+                for (index, r) in info.resolutions.iter().enumerate() {
+                    if ui
+                        .selectable_label(
+                            self.resolution == Some(index)
+                                && self.settings.quality != Quality::AudioMp3,
+                            r.label(),
+                        )
+                        .clicked()
+                    {
+                        self.resolution = Some(index);
+                        self.settings.quality = Quality::Best;
+                    }
+                }
+                if ui
+                    .selectable_label(
+                        self.settings.quality == Quality::AudioMp3,
+                        "Только аудио (MP3)",
+                    )
+                    .clicked()
+                {
+                    self.resolution = None;
+                    self.settings.quality = Quality::AudioMp3;
+                }
+            });
+        let previous = self.language.clone();
+        egui::ComboBox::from_id_salt("audio_language")
+            .selected_text(
+                self.language
+                    .as_deref()
+                    .map(crate::media::language_label)
+                    .unwrap_or_else(|| "Озвучка: автоматически".into()),
+            )
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.language, None, "Автоматически");
+                for language in info.languages() {
+                    ui.selectable_value(
+                        &mut self.language,
+                        Some(language.clone()),
+                        crate::media::language_label(&language),
+                    );
+                }
+            });
+        if self.language != previous {
+            self.track = self
+                .language
+                .as_deref()
+                .and_then(|l| info.tracks(l).into_iter().next());
+        }
+        if let Some(language) = self.language.as_deref() {
+            egui::ComboBox::from_id_salt("audio_track")
+                .selected_text(self.track.as_deref().unwrap_or("Автоматически"))
+                .show_ui(ui, |ui| {
+                    for track in info.tracks(language) {
+                        ui.selectable_value(&mut self.track, Some(track.clone()), track);
+                    }
+                });
+        }
+        let webm = self.settings.quality != Quality::AudioMp3
+            && self.settings.container == VideoContainer::Webm;
+        let result = info
+            .audio_option(self.language.as_deref(), self.track.as_deref(), webm)
+            .and_then(|a| {
+                info.selector(
+                    self.resolution.and_then(|i| info.resolutions.get(i)),
+                    self.settings.quality,
+                    self.settings.container,
+                    a.as_ref(),
+                )
+            });
+        match result {
+            Ok(selector) => {
+                ui.collapsing("Технические подробности", |ui| {
+                    ui.monospace(format!("Выбранные ID: {selector}"));
+                    egui::ScrollArea::vertical()
+                        .id_salt("format_details")
+                        .max_height(130.0)
+                        .show(ui, |ui| {
+                            for f in &info.formats {
+                                ui.monospace(format!(
+                                    "{} · {}p · {} fps · {} · {} · {} · {}",
+                                    f.id, f.height, f.fps, f.ext, f.codec, f.language, f.track
+                                ));
+                            }
+                        });
+                });
+            }
+            Err(e) => {
+                ui.colored_label(egui::Color32::from_rgb(240, 180, 90), e);
+            }
+        }
+        ui.small("После анализа список качества заменяет пресеты. Совместимость проверяется перед добавлением.");
     }
 }

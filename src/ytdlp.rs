@@ -140,11 +140,11 @@ pub fn download_args(spec: &DownloadSpec) -> Vec<String> {
     }
 
     args.push("-f".to_owned());
-    args.push(build_format(
-        spec.quality,
-        spec.audio_id.as_deref(),
-        spec.container,
-    ));
+    args.push(
+        spec.format_override.clone().unwrap_or_else(|| {
+            build_format(spec.quality, spec.audio_id.as_deref(), spec.container)
+        }),
+    );
 
     args.push("-P".to_owned());
     args.push(spec.output_dir.to_string_lossy().into_owned());
@@ -239,6 +239,14 @@ pub fn load_audio_options(
     browser: Option<&str>,
     proxy: Option<&str>,
 ) -> Result<Vec<AudioOption>, String> {
+    parse_audio_options(&load_info_json(url, browser, proxy)?)
+}
+
+pub fn load_info_json(
+    url: &str,
+    browser: Option<&str>,
+    proxy: Option<&str>,
+) -> Result<Vec<u8>, String> {
     let mut command = Command::new(YT_DLP);
 
     command.args(info_args(url, browser, proxy));
@@ -259,7 +267,7 @@ pub fn load_audio_options(
         });
     }
 
-    parse_audio_options(&output.stdout)
+    Ok(output.stdout)
 }
 
 // --------------------------------------------------
@@ -688,5 +696,18 @@ mod cookies_guard_tests {
         assert!(info_args("https://youtu.be/x", Some("firefox"), None)
             .iter()
             .any(|a| a == "--cookies-from-browser"));
+    }
+}
+
+#[cfg(test)]
+mod analyzed_format_tests {
+    use super::*;
+    #[test]
+    fn analyzed_selector_overrides_preset() {
+        let mut spec = sample_spec();
+        spec.format_override = Some("137+140".into());
+        let args = download_args(&spec);
+        let at = args.iter().position(|a| a == "-f").unwrap();
+        assert_eq!(args[at + 1], "137+140");
     }
 }
