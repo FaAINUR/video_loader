@@ -185,6 +185,8 @@ pub struct SavedJob {
     pub audio_label: String,
     #[serde(default)]
     pub format_override: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
     pub browser: Option<String>,
     #[serde(default)]
     pub proxy: Option<String>,

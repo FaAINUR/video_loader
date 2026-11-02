@@ -13,6 +13,7 @@ pub struct DownloadItem {
     pub id: u64,
     pub spec: DownloadSpec,
     pub audio_label: String,
+    pub title: Option<String>,
 
     pub status: Status,
     pub percent: f32,
@@ -40,6 +41,7 @@ impl DownloadItem {
             id,
             spec,
             audio_label,
+            title: None,
             status: Status::Waiting,
             percent: 0.0,
             speed: String::new(),
@@ -182,6 +184,7 @@ impl DownloadItem {
             audio_id: self.spec.audio_id.clone(),
             format_override: self.spec.format_override.clone(),
             audio_label: self.audio_label.clone(),
+            title: self.title.clone(),
             browser: self.spec.browser.clone(),
             proxy: self.spec.proxy.clone(),
             embed_cover: self.spec.embed_cover,
@@ -222,6 +225,7 @@ impl DownloadItem {
                 output_dir: PathBuf::from(job.output_dir),
             },
             audio_label: job.audio_label,
+            title: job.title,
             status,
             percent: if status == Status::Completed {
                 1.0
@@ -273,6 +277,29 @@ pub fn restore_items(saved: Vec<SavedJob>) -> (Vec<DownloadItem>, u64) {
     let items = saved.into_iter().map(DownloadItem::from_saved).collect();
 
     (items, next_id)
+}
+
+#[cfg(test)]
+mod title_tests {
+    use super::*;
+
+    #[test]
+    fn title_survives_save_and_restore() {
+        let mut item = DownloadItem::new(1, sample_spec(), "Автоматически".into());
+        item.title = Some("Название ролика".into());
+        let json = serde_json::to_string(&item.to_saved(5)).unwrap();
+        let restored = DownloadItem::from_saved(serde_json::from_str(&json).unwrap());
+        assert_eq!(restored.title.as_deref(), Some("Название ролика"));
+    }
+
+    #[test]
+    fn history_without_title_still_loads() {
+        let item = DownloadItem::new(1, sample_spec(), "Автоматически".into());
+        let mut value = serde_json::to_value(item.to_saved(5)).unwrap();
+        value.as_object_mut().unwrap().remove("title");
+        let saved: SavedJob = serde_json::from_value(value).unwrap();
+        assert_eq!(DownloadItem::from_saved(saved).title, None);
+    }
 }
 
 #[cfg(test)]

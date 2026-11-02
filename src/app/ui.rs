@@ -260,7 +260,15 @@ impl App {
                         egui::Frame::group(ui.style()).show(ui, |ui| {
                             ui.set_min_width(ui.available_width());
 
-                            ui.label(egui::RichText::new(&item.spec.url).strong());
+                            let heading = item
+                                .title
+                                .as_deref()
+                                .filter(|title| !title.trim().is_empty())
+                                .unwrap_or(&item.spec.url);
+                            ui.label(egui::RichText::new(heading).strong());
+                            ui.collapsing("Ссылка", |ui| {
+                                ui.hyperlink_to(&item.spec.url, &item.spec.url);
+                            });
 
                             ui.horizontal_wrapped(|ui| {
                                 ui.label(item.status.label());

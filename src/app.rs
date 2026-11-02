@@ -325,8 +325,15 @@ impl App {
                 output_dir: output_dir.clone(),
             };
 
-            self.items
-                .push(DownloadItem::new(self.next_id, spec, audio_label.clone()));
+            let mut item = DownloadItem::new(self.next_id, spec, audio_label.clone());
+            if !playlist {
+                item.title = self
+                    .media
+                    .as_ref()
+                    .map(|info| info.title.clone())
+                    .filter(|title| !title.trim().is_empty() && title != "Не указано");
+            }
+            self.items.push(item);
 
             self.next_id += 1;
             added += 1;
